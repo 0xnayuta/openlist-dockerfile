@@ -1,0 +1,67 @@
+name: Auto Update OpenList Version
+
+on:
+  schedule:
+    # 每天 UTC 00:00 (北京时间 08:00) 自动执行检测
+    - cron: '0 0 * * *'
+  workflow_dispatch: # 支持在页面手动触发
+
+jobs:
+  check-and-update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Fetch Upstream Version and Check Diff
+        id: check_version
+        run: |
+          # 1. 获取官方最新 Release 标签
+          LATEST_TAG=$(curl -s "https://api.github.com/repos/OpenListTeam/OpenList/releases/latest" | jq -r '.tag_name')
+          echo "Latest upstream version: $LATEST_TAG"
+
+          if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" = "null" ]; then
+            echo "Error: Failed to fetch valid tag."
+            exit 1
+          fi
+
+          # 2. 获取当前 Dockerfile 中的版本
+          CURRENT_TAG=$(grep -oE 'openlistteam/openlist:[^ ]+' Dockerfile | cut -d: -f2)
+          echo "Current version in Dockerfile: $CURRENT_TAG"
+
+          # 3. 输出变量到步骤输出 (Outputs)
+          echo "latest_tag=${LATEST_TAG}" >> "$GITHUB_OUTPUT"
+
+          if [ "$CURRENT_TAG" != "$LATEST_TAG" ]; then
+            echo "New version detected ($CURRENT_TAG -> $LATEST_TAG)"
+            sed -i -E "s|FROM openlistteam/openlist:.*|FROM openlistteam/openlist:${LATEST_TAG}|g" Dockerfile
+            echo "has_update=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Already up-to-date."
+            echo "has_update=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit and Push Changes
+        if: steps.check_version.outputs.has_update == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Dockerfile
+          git commit -m "chore(deps): bump openlist to ${{ steps.check_version.outputs.latest_tag }}"
+          git push
+
+      - name: Send Telegram Notification on Failure
+        if: failure()
+        run: |
+          MESSAGE="⚠️ *OpenList 自动更新工作流执行失败* %0A%0A"
+          MESSAGE+="*仓库*: ${{ github.repository }} %0A"
+          MESSAGE+="*运行编号*: #${{ github.run_number }} %0A"
+          MESSAGE+="*详情直达*: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d "parse_mode=Markdown" \
+            -d "text=${MESSAGE}"
